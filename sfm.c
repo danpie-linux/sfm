@@ -76,6 +76,49 @@ static pid_t fork_pid, main_pid;
 static char **selected_entries = NULL;
 static int selected_count = 0;
 static int mode;
+static volatile sig_atomic_t resize_pending;
+static volatile sig_atomic_t screen_busy;
+static volatile sig_atomic_t input_active;
+
+static size_t
+term_buffer_size(void)
+{
+	size_t rows = term.rows > 0 ? (size_t)term.rows : 24;
+	size_t cols = term.cols > 0 ? (size_t)term.cols : 80;
+
+	if (rows > ((size_t)-1) / cols / 4)
+		die("terminal too large");
+	return rows * cols * 4;
+}
+
+static void
+term_prepare_buffer(void)
+{
+	size_t size = term_buffer_size();
+
+	if (term.buffer == NULL || term.buffer_size < size) {
+		term.buffer = erealloc(term.buffer, size);
+		term.buffer_size = size;
+	}
+	term.buffer_index = 0;
+	term.buffer_left = term.buffer_size;
+}
+
+static void
+adjust_pane_view(Pane *pane)
+{
+	int visible = term.rows - 2;
+
+	if (visible < 1)
+		visible = 1;
+	if (pane->current_index < pane->start_index) {
+		pane->start_index = pane->current_index;
+	} else if (pane->current_index >= pane->start_index + visible) {
+		pane->start_index = pane->current_index - visible + 1;
+	}
+	if (pane->start_index < 0)
+		pane->start_index = 0;
+}
 
 static void
 log_to_file(const char *func, int line, const char *format, ...)
@@ -101,10 +144,7 @@ static void
 init_term(void)
 {
 	get_term_size();
-	term.buffer_size = (unsigned long)term.rows * term.cols * 4;
-	term.buffer = ecalloc(term.buffer_size, sizeof(char));
-	term.buffer_left = term.buffer_size;
-	term.buffer_index = 0;
+	term_prepare_buffer();
 }
 
 static void
@@ -125,9 +165,15 @@ static void
 get_term_size(void)
 {
 	struct winsize ws;
-	ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
-	term.rows = ws.ws_row;
-	term.cols = ws.ws_col;
+
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0 &&
+		ws.ws_col > 0) {
+		term.rows = ws.ws_row;
+		term.cols = ws.ws_col;
+	} else if (term.rows <= 0 || term.cols <= 0) {
+		term.rows = 24;
+		term.cols = 80;
+	}
 }
 
 static void
@@ -508,10 +554,34 @@ format_color(ColorPair color, char *buf, size_t size)
 	return buf;
 }
 
+static void
+block_term_signals(void)
+{
+	sigset_t set;
+
+	sigemptyset(&set);
+	sigaddset(&set, SIGHUP);
+	sigaddset(&set, SIGUSR1);
+	sigaddset(&set, SIGUSR2);
+	sigaddset(&set, SIGWINCH);
+	pthread_sigmask(SIG_BLOCK, &set, NULL);
+}
+
+static void
+process_pending_resize(void)
+{
+	if (!resize_pending || screen_busy || input_active)
+		return;
+	resize_pending = 0;
+	termb_resize();
+}
+
 static int
 start_signal(void)
 {
 	struct sigaction sa;
+	struct sigaction resize_sa;
+
 	main_pid = getpid();
 	sa.sa_handler = sighandler;
 	sigemptyset(&sa.sa_mask);
@@ -519,7 +589,9 @@ start_signal(void)
 	sigaction(SIGHUP, &sa, 0);
 	sigaction(SIGUSR1, &sa, 0);
 	sigaction(SIGUSR2, &sa, 0);
-	sigaction(SIGWINCH, &sa, 0);
+	resize_sa = sa;
+	resize_sa.sa_flags = 0;
+	sigaction(SIGWINCH, &resize_sa, 0);
 	return 0;
 }
 
@@ -532,6 +604,10 @@ sighandler(int signo)
 	switch (signo) {
 	case SIGWINCH:
 		log_to_file(__func__, __LINE__, "SIGWINCH");
+		if (screen_busy || input_active) {
+			resize_pending = 1;
+			break;
+		}
 		termb_resize();
 		break;
 	case SIGUSR1:
@@ -552,6 +628,7 @@ sighandler(int signo)
 	default:
 		break;
 	}
+	process_pending_resize();
 }
 
 static void
@@ -761,6 +838,9 @@ entry_compare(const void *a, const void *b)
 static void
 update_screen(void)
 {
+	sig_atomic_t was_busy = screen_busy;
+
+	screen_busy = 1;
 	// clear all except last line
 	write(STDOUT_FILENO, "\x1b[F\x1b[A\x1b[999C\x1b[1J", 16);
 	append_entries(&panes[Left]);
@@ -773,6 +853,7 @@ update_screen(void)
 		display_entry_details();
 	else
 		print_status(color_err, strerror(errno));
+	screen_busy = was_busy;
 }
 
 static void
@@ -788,6 +869,7 @@ append_entries(Pane *pane)
 {
 	int i;
 	int n = 0;
+	size_t available;
 	size_t index = 0;
 	size_t max_len = term.cols / 2;
 	Entry entry;
@@ -822,13 +904,17 @@ append_entries(Pane *pane)
 		}
 
 		// Format the entry with truncation and padding
+		available = index < term.buffer_size ?
+			term.buffer_size - index : 0;
+		if (available == 0)
+			break;
 		format_color(entry.color, color_seq, sizeof(color_seq));
-		n = snprintf(buffer + index, term.buffer_size - index,
+		n = snprintf(buffer + index, available,
 			"\x1b[%dG"
 			"\x1b[%sm%-*.*s\x1b[0m\r\n",
 			pane->offset, color_seq, (int)max_len, (int)max_len,
 			entry.name);
-		if (n < 0)
+		if (n < 0 || (size_t)n >= available)
 			break;
 
 		index += n;
@@ -1068,6 +1154,25 @@ get_entry_group(char *buf, const gid_t gid)
 	}
 }
 
+static void
+redraw_input(const char *prompt, const char *input, size_t len)
+{
+	fflush(stdout);
+	print_status(color_normal, "%s", prompt);
+	if (len > 0 && write(STDOUT_FILENO, input, len) < 0)
+		die("write:");
+}
+
+static void
+handle_input_resize(const char *prompt, const char *input, size_t len)
+{
+	if (!resize_pending)
+		return;
+	resize_pending = 0;
+	termb_resize();
+	redraw_input(prompt, input, len);
+}
+
 static int
 get_user_input(char *input, size_t size, const char *prompt, ...)
 {
@@ -1078,19 +1183,37 @@ get_user_input(char *input, size_t size, const char *prompt, ...)
 
 	va_start(args, prompt);
 	vsnprintf(msg, PROMPT_MAX, prompt, args);
-	print_status(color_normal, msg);
 	va_end(args);
 
+	input_active = 1;
+	print_status(color_normal, "%s", msg);
+
 	while (1) {
+		handle_input_resize(msg, input, index);
+		errno = 0;
 		c = getchar();
+		if (c == EOF) {
+			if (errno == EINTR) {
+				clearerr(stdin);
+				handle_input_resize(msg, input, index);
+				continue;
+			}
+			input_active = 0;
+			process_pending_resize();
+			return -1;
+		}
+		handle_input_resize(msg, input, index);
 
 		switch (c) {
 		case XK_ESC:
+			input_active = 0;
+			process_pending_resize();
 			display_entry_details();
 			return -1;
 		case XK_ENTER:
 			input[index] = '\0';
-			//display_entry_details();
+			input_active = 0;
+			process_pending_resize();
 			return 0;
 		case XK_BACKSPACE:
 			if (index > 0) {
@@ -1356,9 +1479,19 @@ execute_command(Command *cmd)
 static void
 termb_append(const char *str, size_t len)
 {
-	if (len >= term.buffer_left) {
-		term.buffer = erealloc(term.buffer, term.buffer_size * 2);
-		term.buffer_size *= 2;
+	size_t needed = term.buffer_index + len + 1;
+	size_t size = term.buffer_size;
+
+	if (needed > size) {
+		if (size == 0)
+			size = 256;
+		while (size < needed) {
+			if (size > ((size_t)-1) / 2)
+				die("buffer too large");
+			size *= 2;
+		}
+		term.buffer = erealloc(term.buffer, size);
+		term.buffer_size = size;
 	}
 
 	memcpy(&term.buffer[term.buffer_index], str, len);
@@ -1369,8 +1502,10 @@ termb_append(const char *str, size_t len)
 static void
 termb_write(void)
 {
-	if (write(STDOUT_FILENO, term.buffer, term.buffer_index - 1) < 0)
+	if (term.buffer_index > 1 &&
+		write(STDOUT_FILENO, term.buffer, term.buffer_index - 1) < 0) {
 		die("write:");
+	}
 	term.buffer_index = 0;
 	term.buffer_left = term.buffer_size;
 }
@@ -1402,9 +1537,21 @@ write_entries_name(void)
 static void
 termb_resize(void)
 {
-	termb_append("\033[2J", 4);
+	int saved_errno = errno;
+
+	screen_busy = 1;
 	get_term_size();
+	term_prepare_buffer();
+	panes[Left].offset = 0;
+	panes[Right].offset = term.cols / 2;
+	adjust_pane_view(&panes[Left]);
+	adjust_pane_view(&panes[Right]);
+	if (write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7) < 0)
+		die("write:");
+	errno = 0;
 	update_screen();
+	errno = saved_errno;
+	screen_busy = 0;
 }
 
 static void
@@ -1840,6 +1987,7 @@ event_handler(void *arg)
 	char buffer[EV_BUF_LEN];
 	int length, i;
 
+	block_term_signals();
 	log_to_file(__func__, __LINE__, "Event handler started for path: %s",
 		pane->path);
 
@@ -1943,6 +2091,7 @@ event_handler(void *arg)
 	Pane *pane = (Pane *)arg;
 	struct kevent event;
 
+	block_term_signals();
 	log_to_file(__func__, __LINE__, "Event handler started for path: %s",
 		pane->path);
 
@@ -2250,9 +2399,17 @@ main(int argc, const char *argv[])
 
 		filesystem_event_init();
 		while (1) {
+			process_pending_resize();
+			errno = 0;
 			c = getchar();
-			if (c == EOF)
+			if (c == EOF) {
+				if (errno == EINTR) {
+					clearerr(stdin);
+					process_pending_resize();
+					continue;
+				}
 				quit(NULL);
+			}
 			handle_keypress(c);
 		}
 	} else if (argc == 2 && strncmp("-v", argv[1], 2) == 0) {
