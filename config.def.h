@@ -7,29 +7,39 @@
 
 #include "sfm.h"
 
+/* Theme colors come from the environment at runtime.
+ * Single source of truth: /usr/local/bin/set_system_theme, which writes
+ * ~/.Xresources.d/system-colors and exports the pywal/wallust/base16 palette:
+ * BACKGROUND, FOREGROUND, CURSOR, COLOR0..COLOR15 plus semantic aliases
+ * ACCENT (=COLOR4), BORDER (=COLOR8), URGENT (=COLOR1), SELECTION, MUTED.
+ * sfm.c:theme_init() overwrites the foreground/background of the pairs below
+ * with truecolor values when a palette is found; the values here are
+ * compile-time fallbacks. `pkill -HUP sfm` reloads the palette.
+ * SYSTEM_COLORS_XRES overrides the Xresources file path. */
+
 /* color pairs                            fg   bg   attr*/
-static const ColorPair color_blk       = { 95,  0,   NORM };
-static const ColorPair color_brlnk     = { 0,   9,   NORM };
-static const ColorPair color_chr       = { 94,  0,   NORM };
-static const ColorPair color_dir       = { 31,  0,   NORM };
-static const ColorPair color_exec      = { 91,  0,   NORM };
-static const ColorPair color_sock      = { 92,  0,   NORM };
-static const ColorPair color_ifo       = { 93,  0,   NORM };
-static const ColorPair color_lnk       = { 96,  0,   NORM };
-static const ColorPair color_other     = { 90,  0,   NORM };
-static const ColorPair color_file      = { 243, 0,   NORM };
+static ColorPair color_blk       = { .fg = 95,  .bg = 0,   .attr = NORM };
+static ColorPair color_brlnk     = { .fg = 0,   .bg = 9,   .attr = NORM };
+static ColorPair color_chr       = { .fg = 94,  .bg = 0,   .attr = NORM };
+static ColorPair color_dir       = { .fg = 31,  .bg = 0,   .attr = NORM };
+static ColorPair color_exec      = { .fg = 91,  .bg = 0,   .attr = NORM };
+static ColorPair color_sock      = { .fg = 92,  .bg = 0,   .attr = NORM };
+static ColorPair color_ifo       = { .fg = 93,  .bg = 0,   .attr = NORM };
+static ColorPair color_lnk       = { .fg = 96,  .bg = 0,   .attr = NORM };
+static ColorPair color_other     = { .fg = 90,  .bg = 0,   .attr = NORM };
+static ColorPair color_file      = { .fg = 243, .bg = 0,   .attr = NORM };
 
-static const ColorPair color_frame     = { 237,  0,  NORM };
-static const ColorPair color_panell    = { 166, 233, BOLD };
-static const ColorPair color_panelr    = { 5,   233, BOLD };
-static const ColorPair color_status    = { 243, 0,   NORM };
+static ColorPair color_frame     = { .fg = 237, .bg = 0,   .attr = NORM };
+static ColorPair color_panell    = { .fg = 166, .bg = 233, .attr = BOLD };
+static ColorPair color_panelr    = { .fg = 5,   .bg = 233, .attr = BOLD };
+static ColorPair color_status    = { .fg = 243, .bg = 0,   .attr = NORM };
 
-static const ColorPair color_search    = { 15, 104,   NORM };
-static const ColorPair color_selected  = { 21, 118,  NORM };
+static ColorPair color_search    = { .fg = 15,  .bg = 104, .attr = NORM };
+static ColorPair color_selected  = { .fg = 21,  .bg = 118, .attr = NORM };
 
-static const ColorPair color_normal    = { 33,  0,   NORM };
-static const ColorPair color_warn      = { 220, 0,   NORM };
-static const ColorPair color_err       = { 124, 0,   BOLD };
+static ColorPair color_normal    = { .fg = 33,  .bg = 0,   .attr = NORM };
+static ColorPair color_warn      = { .fg = 220, .bg = 0,   .attr = NORM };
+static ColorPair color_err       = { .fg = 124, .bg = 0,   .attr = BOLD };
 
 
 /* commands */

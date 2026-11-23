@@ -1,3 +1,11 @@
+# Personal sfm fork
+
+Local changes on top of upstream:
+
+- **Runtime theme palette**: colors are read from `~/.Xresources.d/system-colors` (override with `SYSTEM_COLORS_XRES`) and the standard palette environment variables (`BACKGROUND`, `FOREGROUND`, `CURSOR`, `COLOR0..15`, `ACCENT`, `BORDER`, `URGENT`, `SELECTION`, `MUTED`), then rendered as truecolor RGB. The color pairs in `config.h` remain compile-time fallbacks.
+- **Hot theme reload**: `pkill -HUP sfm` re-reads the current theme and repaints the panes and status bar.
+- **Symlink install**: `make install` creates a symlink in `${PREFIX}/bin` pointing at the build-tree binary instead of copying it.
+
 <img src="https://raw.githubusercontent.com/afify/sfm/main/sfm.png" alt="sfm logo"/>
 
 **simple file manager**

@@ -150,6 +150,364 @@ get_env(void)
 		home = env_home;
 }
 
+#define COLOR_SEQ_MAX 64
+
+typedef struct {
+	Rgb background;
+	Rgb foreground;
+	Rgb cursor;
+	Rgb color[16];
+	Rgb accent;
+	Rgb border;
+	Rgb urgent;
+	Rgb selection;
+	Rgb muted;
+	Rgb panel_bg;
+	int have_background;
+	int have_foreground;
+	int have_cursor;
+	int have_color[16];
+	int have_accent;
+	int have_border;
+	int have_urgent;
+	int have_selection;
+	int have_muted;
+	int have_panel_bg;
+} ThemePalette;
+
+static ColorPair *color_pairs[] = {
+	&color_blk, &color_brlnk, &color_chr, &color_dir, &color_exec,
+	&color_sock, &color_ifo, &color_lnk, &color_other, &color_file,
+	&color_frame, &color_panell, &color_panelr, &color_status,
+	&color_search, &color_selected, &color_normal, &color_warn,
+	&color_err,
+};
+static ColorPair color_defaults[LEN(color_pairs)];
+static int color_defaults_saved;
+
+static int
+parse_color(const char *value, Rgb *out)
+{
+	char buf[7];
+	const char *s;
+	size_t len, i;
+	unsigned long hex;
+	char *end;
+
+	if (value == NULL || *value == '\0')
+		return 0;
+	s = value;
+	if (s[0] == '#') {
+		s++;
+	} else if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+		s += 2;
+	}
+	len = strlen(s);
+	if (len == 3) {
+		for (i = 0; i < 3; i++) {
+			buf[i * 2] = s[i];
+			buf[i * 2 + 1] = s[i];
+		}
+		buf[6] = '\0';
+		s = buf;
+		len = 6;
+	} else if (len == 8) {
+		memcpy(buf, s, 6);
+		buf[6] = '\0';
+		s = buf;
+		len = 6;
+	}
+	if (len != 6)
+		return 0;
+	for (i = 0; i < 6; i++) {
+		if (!isxdigit((unsigned char)s[i]))
+			return 0;
+	}
+	hex = strtoul(s, &end, 16);
+	if (end == s || *end != '\0')
+		return 0;
+	out->r = (uint8_t)((hex >> 16) & 0xFF);
+	out->g = (uint8_t)((hex >> 8) & 0xFF);
+	out->b = (uint8_t)(hex & 0xFF);
+	return 1;
+}
+
+static const char *
+env2(const char *upper, const char *lower)
+{
+	const char *value = getenv(upper);
+
+	if (value && *value)
+		return value;
+	value = getenv(lower);
+	if (value && *value)
+		return value;
+	return NULL;
+}
+
+static void
+palette_env(Rgb *dst, int *have, const char *upper, const char *lower)
+{
+	const char *value = env2(upper, lower);
+
+	if (value && parse_color(value, dst))
+		*have = 1;
+}
+
+static const char *const color_names[16] = {
+	"COLOR0", "COLOR1", "COLOR2", "COLOR3", "COLOR4", "COLOR5",
+	"COLOR6", "COLOR7", "COLOR8", "COLOR9", "COLOR10", "COLOR11",
+	"COLOR12", "COLOR13", "COLOR14", "COLOR15",
+};
+
+static const char *const color_lowers[16] = {
+	"color0", "color1", "color2", "color3", "color4", "color5",
+	"color6", "color7", "color8", "color9", "color10", "color11",
+	"color12", "color13", "color14", "color15",
+};
+
+static void
+theme_read_env(ThemePalette *palette)
+{
+	size_t i;
+
+	memset(palette, 0, sizeof(*palette));
+	palette_env(&palette->background, &palette->have_background,
+		"BACKGROUND", "background");
+	palette_env(&palette->foreground, &palette->have_foreground,
+		"FOREGROUND", "foreground");
+	palette_env(&palette->cursor, &palette->have_cursor,
+		"CURSOR", "cursor");
+	for (i = 0; i < LEN(color_names); i++) {
+		palette_env(&palette->color[i], &palette->have_color[i],
+			color_names[i], color_lowers[i]);
+	}
+	palette_env(&palette->accent, &palette->have_accent,
+		"ACCENT", "accent");
+	palette_env(&palette->border, &palette->have_border,
+		"BORDER", "border");
+	palette_env(&palette->urgent, &palette->have_urgent,
+		"URGENT", "urgent");
+	palette_env(&palette->selection, &palette->have_selection,
+		"SELECTION", "selection");
+	palette_env(&palette->muted, &palette->have_muted,
+		"MUTED", "muted");
+	palette_env(&palette->panel_bg, &palette->have_panel_bg,
+		"WINDOW_BACKGROUND_ALTERNATE", "window_background_alternate");
+}
+
+static int
+theme_read_xresources(ThemePalette *palette)
+{
+	char path[PATH_MAX];
+	char line[256];
+	const char *custom = getenv("SYSTEM_COLORS_XRES");
+	const char *env_home = getenv("HOME");
+	FILE *file;
+	int loaded = 0;
+
+	if (custom && *custom) {
+		snprintf(path, sizeof(path), "%s", custom);
+	} else if (env_home && *env_home) {
+		snprintf(path, sizeof(path), "%s/.Xresources.d/system-colors",
+			env_home);
+	} else {
+		return 0;
+	}
+
+	file = fopen(path, "r");
+	if (file == NULL)
+		return 0;
+
+	loaded = 1;
+	while (fgets(line, sizeof(line), file)) {
+		char *key, *value, *sep;
+
+		if (line[0] != '*')
+			continue;
+		sep = strchr(line, ':');
+		if (sep == NULL)
+			continue;
+		*sep = '\0';
+		key = line + 1;
+		value = sep + 1;
+		while (*value == ' ' || *value == '\t')
+			value++;
+		value[strcspn(value, " \t\r\n")] = '\0';
+
+		if (strcmp(key, "background") == 0) {
+			if (parse_color(value, &palette->background))
+				palette->have_background = 1;
+		} else if (strcmp(key, "foreground") == 0) {
+			if (parse_color(value, &palette->foreground))
+				palette->have_foreground = 1;
+		} else if (strcmp(key, "cursorColor") == 0) {
+			if (parse_color(value, &palette->cursor))
+				palette->have_cursor = 1;
+		} else if (strncmp(key, "color", 5) == 0) {
+			char *end;
+			unsigned long index = strtoul(key + 5, &end, 10);
+			if (*end == '\0' && index < LEN(palette->color) &&
+				parse_color(value, &palette->color[index])) {
+				palette->have_color[index] = 1;
+			}
+		}
+	}
+	fclose(file);
+	return loaded;
+}
+
+static void
+theme_derive(ThemePalette *palette)
+{
+	if (!palette->have_background && palette->have_color[0]) {
+		palette->background = palette->color[0];
+		palette->have_background = 1;
+	}
+	if (!palette->have_foreground && palette->have_color[7]) {
+		palette->foreground = palette->color[7];
+		palette->have_foreground = 1;
+	}
+	if (!palette->have_accent && palette->have_color[4]) {
+		palette->accent = palette->color[4];
+		palette->have_accent = 1;
+	}
+	if (!palette->have_border && palette->have_color[8]) {
+		palette->border = palette->color[8];
+		palette->have_border = 1;
+	}
+	if (!palette->have_urgent && palette->have_color[1]) {
+		palette->urgent = palette->color[1];
+		palette->have_urgent = 1;
+	}
+	if (!palette->have_selection) {
+		if (palette->have_color[8]) {
+			palette->selection = palette->color[8];
+			palette->have_selection = 1;
+		} else if (palette->have_color[4]) {
+			palette->selection = palette->color[4];
+			palette->have_selection = 1;
+		} else if (palette->have_background) {
+			palette->selection = palette->background;
+			palette->have_selection = 1;
+		}
+	}
+	if (!palette->have_muted && palette->have_color[8]) {
+		palette->muted = palette->color[8];
+		palette->have_muted = 1;
+	}
+	if (!palette->have_panel_bg) {
+		if (palette->have_color[0]) {
+			palette->panel_bg = palette->color[0];
+			palette->have_panel_bg = 1;
+		} else if (palette->have_background) {
+			palette->panel_bg = palette->background;
+			palette->have_panel_bg = 1;
+		}
+	}
+}
+
+static void
+theme_set(ColorPair *pair, const Rgb *fg, const Rgb *bg)
+{
+	if (fg == NULL || bg == NULL)
+		return;
+	pair->fg_rgb = *fg;
+	pair->bg_rgb = *bg;
+	pair->truecolor = 1;
+}
+
+static void
+theme_apply(const ThemePalette *palette)
+{
+	const Rgb *bg;
+	const Rgb *fg;
+	const Rgb *panel_bg;
+
+	if (!palette->have_background || !palette->have_foreground)
+		return;
+	bg = &palette->background;
+	fg = &palette->foreground;
+	panel_bg = palette->have_panel_bg ? &palette->panel_bg : bg;
+
+	theme_set(&color_file, fg, bg);
+	theme_set(&color_dir,
+		palette->have_accent ? &palette->accent : NULL, bg);
+	theme_set(&color_exec,
+		palette->have_color[2] ? &palette->color[2] : NULL, bg);
+	theme_set(&color_lnk,
+		palette->have_color[6] ? &palette->color[6] : NULL, bg);
+	theme_set(&color_sock,
+		palette->have_color[10] ? &palette->color[10] :
+		(palette->have_color[2] ? &palette->color[2] : NULL), bg);
+	theme_set(&color_ifo,
+		palette->have_color[3] ? &palette->color[3] : NULL, bg);
+	theme_set(&color_chr,
+		palette->have_color[12] ? &palette->color[12] :
+		(palette->have_color[6] ? &palette->color[6] : NULL), bg);
+	theme_set(&color_blk,
+		palette->have_color[5] ? &palette->color[5] : NULL, bg);
+	theme_set(&color_brlnk,
+		palette->have_color[9] ? &palette->color[9] : NULL, bg);
+	theme_set(&color_other,
+		palette->have_muted ? &palette->muted : NULL, bg);
+	theme_set(&color_frame,
+		palette->have_border ? &palette->border : NULL, bg);
+	theme_set(&color_panell,
+		palette->have_color[3] ? &palette->color[3] : NULL, panel_bg);
+	theme_set(&color_panelr,
+		palette->have_color[5] ? &palette->color[5] : NULL, panel_bg);
+	theme_set(&color_status,
+		palette->have_muted ? &palette->muted : NULL, bg);
+	theme_set(&color_search, bg,
+		palette->have_accent ? &palette->accent : NULL);
+	theme_set(&color_selected, fg,
+		palette->have_selection ? &palette->selection : NULL);
+	theme_set(&color_normal,
+		palette->have_accent ? &palette->accent : NULL, bg);
+	theme_set(&color_warn,
+		palette->have_color[3] ? &palette->color[3] : NULL, bg);
+	theme_set(&color_err,
+		palette->have_urgent ? &palette->urgent : NULL, bg);
+}
+
+static void
+theme_init(void)
+{
+	ThemePalette palette;
+	size_t i;
+
+	if (!color_defaults_saved) {
+		for (i = 0; i < LEN(color_pairs); i++)
+			color_defaults[i] = *color_pairs[i];
+		color_defaults_saved = 1;
+	} else {
+		for (i = 0; i < LEN(color_pairs); i++)
+			*color_pairs[i] = color_defaults[i];
+	}
+
+	theme_read_env(&palette);
+	theme_read_xresources(&palette);
+	theme_derive(&palette);
+	theme_apply(&palette);
+}
+
+static const char *
+format_color(ColorPair color, char *buf, size_t size)
+{
+	if (color.truecolor) {
+		snprintf(buf, size,
+			"%d;38;2;%d;%d;%d;48;2;%d;%d;%d",
+			color.attr,
+			color.fg_rgb.r, color.fg_rgb.g, color.fg_rgb.b,
+			color.bg_rgb.r, color.bg_rgb.g, color.bg_rgb.b);
+	} else {
+		snprintf(buf, size, "%d;38;5;%d;48;5;%d",
+			color.attr, color.fg, color.bg);
+	}
+	return buf;
+}
+
 static int
 start_signal(void)
 {
@@ -158,6 +516,7 @@ start_signal(void)
 	sa.sa_handler = sighandler;
 	sigemptyset(&sa.sa_mask);
 	sa.sa_flags = SA_RESTART;
+	sigaction(SIGHUP, &sa, 0);
 	sigaction(SIGUSR1, &sa, 0);
 	sigaction(SIGUSR2, &sa, 0);
 	sigaction(SIGWINCH, &sa, 0);
@@ -183,6 +542,11 @@ sighandler(int signo)
 	case SIGUSR2:
 		log_to_file(__func__, __LINE__, "SIGUSR2");
 		set_pane_entries(&panes[Right]);
+		update_screen();
+		break;
+	case SIGHUP:
+		log_to_file(__func__, __LINE__, "SIGHUP");
+		theme_init();
 		update_screen();
 		break;
 	default:
@@ -427,6 +791,7 @@ append_entries(Pane *pane)
 	size_t index = 0;
 	size_t max_len = term.cols / 2;
 	Entry entry;
+	char color_seq[COLOR_SEQ_MAX];
 	char *buffer;
 
 	if (pane->entries == NULL) {
@@ -457,11 +822,12 @@ append_entries(Pane *pane)
 		}
 
 		// Format the entry with truncation and padding
+		format_color(entry.color, color_seq, sizeof(color_seq));
 		n = snprintf(buffer + index, term.buffer_size - index,
 			"\x1b[%dG"
-			"\x1b[%d;38;5;%d;48;5;%dm%-*.*s\x1b[0m\r\n",
-			pane->offset, entry.color.attr, entry.color.fg,
-			entry.color.bg, (int)max_len, (int)max_len, entry.name);
+			"\x1b[%sm%-*.*s\x1b[0m\r\n",
+			pane->offset, color_seq, (int)max_len, (int)max_len,
+			entry.name);
 		if (n < 0)
 			break;
 
@@ -498,6 +864,7 @@ static void
 print_status(ColorPair color, const char *fmt, ...)
 {
 	char buf[term.cols];
+	char color_seq[COLOR_SEQ_MAX];
 	int buf_len;
 	size_t max_result_size;
 	size_t result_len;
@@ -507,17 +874,20 @@ print_status(ColorPair color, const char *fmt, ...)
 	buf_len = vsnprintf(buf, term.cols, fmt, vl);
 	va_end(vl);
 
-	max_result_size = 5 + UINT16_LEN + 4 + 15 + UINT8_LEN + UINT8_LEN +
-		UINT8_LEN + buf_len + 6 + 1;
+	if (buf_len < 0)
+		buf_len = 0;
+	format_color(color, color_seq, sizeof(color_seq));
+
+	max_result_size = COLOR_SEQ_MAX + buf_len + 32;
 
 	char result[max_result_size];
 	result_len = snprintf(result, max_result_size,
 		"\x1b[%d;1f" // moves cursor to last line, column 1
 		"\x1b[2K"    // erase the entire line
-		"\x1b[%d;38;5;%d;48;5;%dm" // set string colors
+		"\x1b[%sm"   // set string colors
 		"%s"
 		"\x1b[0;0m", // reset colors
-		term.rows, color.attr, color.fg, color.bg, buf);
+		term.rows, color_seq, buf);
 
 	if (write(STDOUT_FILENO, result, result_len) < 0)
 		die("write:");
@@ -1009,18 +1379,22 @@ static void
 write_entries_name(void)
 {
 	int half_cols = term.cols / 2;
-	char result[term.cols + 100];
+	char left_color[COLOR_SEQ_MAX];
+	char right_color[COLOR_SEQ_MAX];
+	char result[term.cols + 2 * COLOR_SEQ_MAX + 32];
+
+	format_color(color_panell, left_color, sizeof(left_color));
+	format_color(color_panelr, right_color, sizeof(right_color));
 
 	int result_len = snprintf(result, sizeof(result),
-		"\x1b[1;1H"                // Move cursor to top-left corner
-		"\x1b[%d;38;5;%d;48;5;%dm" // Set colors for left pane
-		"%-*.*s"                   // Left string with padding
-		"\x1b[%d;38;5;%d;48;5;%dm" // Set colors for right pane
-		"%-*.*s"                   // Right string with padding
-		"\x1b[0m",                 // Reset colors
-		color_panell.attr, color_panell.fg, color_panell.bg, half_cols,
-		half_cols, panes[Left].path, color_panelr.attr, color_panelr.fg,
-		color_panelr.bg, half_cols, half_cols, panes[Right].path);
+		"\x1b[1;1H"      // Move cursor to top-left corner
+		"\x1b[%sm"       // Set colors for left pane
+		"%-*.*s"         // Left string with padding
+		"\x1b[%sm"       // Set colors for right pane
+		"%-*.*s"         // Right string with padding
+		"\x1b[0m",       // Reset colors
+		left_color, half_cols, half_cols, panes[Left].path,
+		right_color, half_cols, half_cols, panes[Right].path);
 
 	write(STDOUT_FILENO, result, result_len);
 }
@@ -1193,6 +1567,7 @@ update_entry(Pane *pane, int index)
 	int err;
 	size_t max_len;
 	Entry entry;
+	char color_seq[COLOR_SEQ_MAX];
 	char buffer[PATH_MAX];
 	int pos;
 
@@ -1210,11 +1585,12 @@ update_entry(Pane *pane, int index)
 		entry.color.attr |= RVS;
 	}
 
+	format_color(entry.color, color_seq, sizeof(color_seq));
 	err = snprintf(buffer, sizeof(buffer),
 		"\x1b[%d;%dH" // Move cursor to the entry position
-		"\x1b[%d;38;5;%d;48;5;%dm%-*.*s\x1b[0m",
-		pos + 2, pane->offset, entry.color.attr, entry.color.fg,
-		entry.color.bg, (int)max_len - 1, (int)max_len, entry.name);
+		"\x1b[%sm%-*.*s\x1b[0m",
+		pos + 2, pane->offset, color_seq, (int)max_len - 1,
+		(int)max_len, entry.name);
 
 	if (err < 0)
 		print_status(color_err, strerror(errno));
@@ -1864,6 +2240,7 @@ main(int argc, const char *argv[])
 		init_term();
 		enable_raw_mode();
 		get_env();
+		theme_init();
 		set_panes();
 		start_signal();
 		log_to_file(__func__, __LINE__, "start");
@@ -1874,6 +2251,8 @@ main(int argc, const char *argv[])
 		filesystem_event_init();
 		while (1) {
 			c = getchar();
+			if (c == EOF)
+				quit(NULL);
 			handle_keypress(c);
 		}
 	} else if (argc == 2 && strncmp("-v", argv[1], 2) == 0) {

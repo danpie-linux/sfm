@@ -63,9 +63,18 @@ typedef struct {
 } Terminal;
 
 typedef struct {
+	uint8_t r;
+	uint8_t g;
+	uint8_t b;
+} Rgb;
+
+typedef struct {
 	uint8_t fg;
 	uint8_t bg;
 	uint8_t attr;
+	Rgb fg_rgb;
+	Rgb bg_rgb;
+	int truecolor;
 } ColorPair;
 
 typedef struct {
