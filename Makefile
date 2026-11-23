@@ -39,8 +39,7 @@ dist: clean
 
 install: ${BIN}
 	mkdir -p ${DESTDIR}${PREFIX}/bin
-	cp -f ${BIN} ${DESTDIR}${PREFIX}/bin
-	chmod 755 ${DESTDIR}${PREFIX}/bin/${BIN}
+	ln -sfn "${CURDIR}/${BIN}" "${DESTDIR}${PREFIX}/bin/${BIN}"
 	mkdir -p ${DESTDIR}${MANPREFIX}/man1
 	sed "s/VERSION/${VERSION}/g" < ${BIN}.1 > ${DESTDIR}${MANPREFIX}/man1/${BIN}.1
 	chmod 644 ${DESTDIR}${MANPREFIX}/man1/${BIN}.1
